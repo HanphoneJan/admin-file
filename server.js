@@ -7,7 +7,7 @@ const app = express();
 const PORT = process.env.PORT || 4000;
 const baseUploadDir = path.join(__dirname, 'uploads');
 
-// 定义文件类型分类和对应的目录
+// 定义文件类型分类（仅用于无命名空间时）
 const fileCategories = {
     images: ['image/jpeg', 'image/png', 'image/gif', 'image/bmp', 'image/svg+xml', 'image/webp'],
     videos: ['video/mp4', 'video/mpeg', 'video/quicktime', 'video/x-msvideo', 'video/x-matroska'],
@@ -31,7 +31,7 @@ const fileCategories = {
     ]
 };
 
-// 定义扩展名分类型的映射（用于MIME类型无法识别时的 fallback）
+// 定义扩展名分类型的映射（用于MIME类型无法识别时的 fallback，仅用于无命名空间时）
 const extensionToCategory = {
     // 图片
     '.jpg': 'images', '.jpeg': 'images', '.png': 'images', '.gif': 'images',
@@ -50,17 +50,29 @@ const extensionToCategory = {
     '.rtf': 'documents', '.odt': 'documents'
 };
 
-// 确保目录存在
-async function ensureDirectory(dirPath) {
-    if (!fsExists(dirPath)) {
-        await fs.mkdir(dirPath, { recursive: true });
+/**
+ * 确保目录存在，如果不存在则创建
+ * @param {string} dirPath - 目录路径
+ */
+async function ensureDirectoryExists(dirPath) {
+    try {
+        if (!fsExists(dirPath)) {
+            console.log(`目录不存在，正在创建: ${dirPath}`);
+            await fs.mkdir(dirPath, { recursive: true });
+            console.log(`目录创建成功: ${dirPath}`);
+        }
+    } catch (err) {
+        console.error(`创建目录失败 ${dirPath}:`, err);
+        throw err; // 抛出错误以便上层处理
     }
 }
 
-// 初始化基础目录
-ensureDirectory(baseUploadDir).catch(err => console.error('创建基础目录失败:', err));
+// 初始化基础上传目录
+ensureDirectoryExists(baseUploadDir)
+    .then(() => console.log(`基础上传目录准备就绪: ${baseUploadDir}`))
+    .catch(err => console.error('初始化基础目录失败:', err));
 
-// 确定文件分类
+// 确定文件分类（仅用于无命名空间时）
 function getFileCategory(mimetype, filename) {
     // 首先尝试通过MIME类型判断
     for (const [category, types] of Object.entries(fileCategories)) {
@@ -89,13 +101,16 @@ async function fileExists(filePath) {
 }
 
 // 获取完整的文件存储路径
+// 当指定命名空间时，文件直接存储在命名空间目录下，不创建分类子目录
+// 当不指定命名空间时，使用分类目录
 function getFullStoragePath(namespace, category) {
-    // 如果提供了命名空间，则在基础目录下创建对应子目录
     if (namespace) {
-        return path.join(baseUploadDir, namespace, category);
+        // 有命名空间：基础目录/命名空间
+        return path.join(baseUploadDir, namespace);
+    } else {
+        // 无命名空间：基础目录/分类
+        return path.join(baseUploadDir, category);
     }
-    // 否则使用默认路径
-    return path.join(baseUploadDir, category);
 }
 
 // 配置multer存储
@@ -104,13 +119,16 @@ const storage = multer.diskStorage({
         try {
             // 从请求中获取命名空间（可选参数）
             const namespace = req.body.namespace || req.query.namespace;
+            // 获取分类（仅用于无命名空间时）
             const category = getFileCategory(file.mimetype, file.originalname);
             const destPath = getFullStoragePath(namespace, category);
 
-            // 确保目录存在
-            await ensureDirectory(destPath);
+            // 确保目标目录存在
+            await ensureDirectoryExists(destPath);
+
             cb(null, destPath);
         } catch (err) {
+            console.error('设置文件存储目录失败:', err);
             cb(err);
         }
     },
@@ -118,20 +136,20 @@ const storage = multer.diskStorage({
         try {
             // 获取命名空间
             const namespace = req.body.namespace || req.query.namespace;
+            // 获取分类（仅用于无命名空间时）
             const category = getFileCategory(file.mimetype, file.originalname);
             const destPath = getFullStoragePath(namespace, category);
             const originalName = file.originalname;
             const ext = path.extname(originalName);
             const nameWithoutExt = path.basename(originalName, ext);
 
-            console.log(`上传文件: ${originalName}, 命名空间: ${namespace || '默认'}, 分类: ${category}, 存储路径: ${destPath}`);
+            console.log(`上传文件: ${originalName}, 命名空间: ${namespace || '默认'}, ${namespace ? '' : `分类: ${category}`}`);
 
             // 先检查原文件名是否存在
             let filePath = path.join(destPath, originalName);
             let exists = await fileExists(filePath);
 
             // 如果不存在，直接使用原文件名
-            console.log(`文件存在检查: ${filePath} - ${exists ? '存在' : '不存在'}`);
             if (!exists) {
                 return cb(null, originalName);
             }
@@ -161,29 +179,32 @@ const upload = multer({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// 上传文件接口 - 支持任意类型文件并分类存储，可指定命名空间
+// 上传文件接口
 app.post('/upload', upload.single('file'), (req, res) => {
     if (!req.file) {
         return res.status(400).json({ error: '没有文件被上传' });
     }
 
-    // 获取命名空间和文件分类
+    // 获取命名空间和文件分类（分类仅用于无命名空间时）
     const namespace = req.body.namespace || req.query.namespace;
     const category = getFileCategory(req.file.mimetype, req.file.originalname);
 
-    // 构建URL路径（不包含uploads）
+    // 构建URL路径
     let urlPath = '';
     if (namespace) {
-        urlPath += `${namespace}/`;
+        // 有命名空间：命名空间/文件名
+        urlPath = `${namespace}/${req.file.filename}`;
+    } else {
+        // 无命名空间：分类/文件名
+        urlPath = `${category}/${req.file.filename}`;
     }
-    urlPath += `${category}/${req.file.filename}`;
 
     // 返回文件信息
     res.json({
         message: '文件上传成功',
-        url: `https://hanphone.top/${urlPath}`,  // URL中不再有uploads
+        url: `https://hanphone.top/${urlPath}`,
         filename: req.file.filename,
-        category: category,
+        category: namespace ? null : category, // 有命名空间时不返回分类
         namespace: namespace || 'default',
         originalName: req.file.originalname,
         mimetype: req.file.mimetype,
@@ -191,22 +212,31 @@ app.post('/upload', upload.single('file'), (req, res) => {
     });
 });
 
-// 删除文件接口 - 支持指定命名空间
+// 删除文件接口
 app.delete('/delete', async (req, res) => {
-    const { filename, category, namespace } = req.body;
+    const { filename, namespace } = req.body;
+    // 分类仅用于无命名空间时
+    const { category } = req.body;
 
-    if (!filename || !category) {
-        return res.status(400).json({ error: '请提供要删除的文件名和分类' });
+    if (!filename) {
+        return res.status(400).json({ error: '请提供要删除的文件名' });
     }
 
-    // 验证分类是否有效
-    const validCategories = [...Object.keys(fileCategories), 'others'];
-    if (!validCategories.includes(category)) {
-        return res.status(400).json({ error: '无效的文件分类' });
+    // 无命名空间时必须提供分类
+    if (!namespace && !category) {
+        return res.status(400).json({ error: '无命名空间时请提供文件分类' });
+    }
+
+    // 验证分类是否有效（仅用于无命名空间时）
+    if (!namespace) {
+        const validCategories = [...Object.keys(fileCategories), 'others'];
+        if (!validCategories.includes(category)) {
+            return res.status(400).json({ error: '无效的文件分类' });
+        }
     }
 
     // 构建文件路径
-    const filePath = getFullStoragePath(namespace, category) + path.sep + filename;
+    const filePath = path.join(getFullStoragePath(namespace, category), filename);
 
     try {
         // 检查文件是否存在
@@ -218,7 +248,7 @@ app.delete('/delete', async (req, res) => {
         res.json({
             message: '文件删除成功',
             filename,
-            category,
+            category: namespace ? null : category,
             namespace: namespace || 'default'
         });
     } catch (err) {
@@ -226,7 +256,7 @@ app.delete('/delete', async (req, res) => {
             return res.status(404).json({
                 error: '文件不存在',
                 filename,
-                category,
+                category: namespace ? null : category,
                 namespace: namespace || 'default'
             });
         }
@@ -235,8 +265,7 @@ app.delete('/delete', async (req, res) => {
     }
 });
 
-// 提供文件的静态访问，URL中不再包含uploads
-// 关键修改：将静态服务挂载到根路径 '/' 而不是 '/uploads'
+// 提供文件的静态访问
 app.use('/', express.static(baseUploadDir, {
     maxAge: '1d',
     setHeaders: (res, filePath) => {
