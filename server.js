@@ -4,7 +4,7 @@ const path = require('path');
 const fs = require('fs').promises;
 const fsExists = require('fs').existsSync;
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 4000;
 const baseUploadDir = path.join(__dirname, 'uploads');
 
 // 定义文件类型分类和对应的目录
@@ -12,7 +12,7 @@ const fileCategories = {
     images: ['image/jpeg', 'image/png', 'image/gif', 'image/bmp', 'image/svg+xml', 'image/webp'],
     videos: ['video/mp4', 'video/mpeg', 'video/quicktime', 'video/x-msvideo', 'video/x-matroska'],
     codes: [
-        'text/javascript', 'application/javascript', 
+        'text/javascript', 'application/javascript',
         'text/python', 'application/python',
         'text/php', 'application/php',
         'text/java', 'application/java',
@@ -34,13 +34,14 @@ const fileCategories = {
 // 定义扩展名分类型的映射（用于MIME类型无法识别时的 fallback）
 const extensionToCategory = {
     // 图片
-    '.jpg': 'images', '.jpeg': 'images', '.png': 'images', '.gif': 'images', 
+    '.jpg': 'images', '.jpeg': 'images', '.png': 'images', '.gif': 'images',
     '.bmp': 'images', '.svg': 'images', '.webp': 'images',
     // 视频
     '.mp4': 'videos', '.mpeg': 'videos', '.mov': 'videos', '.avi': 'videos', '.mkv': 'videos',
     // 代码
-    '.js': 'codes', '.py': 'codes', '.php': 'codes', '.java': 'codes', 
+    '.js': 'codes', '.py': 'codes', '.php': 'codes', '.java': 'codes',
     '.c': 'codes', '.cpp': 'codes', '.rb': 'codes', '.go': 'codes', '.ts': 'codes',
+    '.html': 'codes', '.css': 'codes', '.js': 'codes', '.tsx': 'codes', '.vue': 'codes',
     // 文档
     '.txt': 'documents', '.md': 'documents', '.pdf': 'documents',
     '.doc': 'documents', '.docx': 'documents',
@@ -76,15 +77,24 @@ function getFileCategory(mimetype, filename) {
             return category;
         }
     }
-    
+
     // 如果MIME类型无法识别，尝试通过扩展名判断
     const ext = path.extname(filename).toLowerCase();
     if (extensionToCategory[ext]) {
         return extensionToCategory[ext];
     }
-    
+
     // 都无法识别则归为其他
     return 'others';
+}
+
+async function fileExists(filePath) {
+    try {
+        await fs.access(filePath);
+        return true;
+    } catch {
+        return false;
+    }
 }
 
 // 配置multer存储
@@ -94,15 +104,38 @@ const storage = multer.diskStorage({
         const destPath = path.join(baseUploadDir, category);
         cb(null, destPath);
     },
-    filename: function (req, file, cb) {
-        // 使用时间戳和随机数确保文件名唯一
-        const uniqueName = `${Date.now()}-${Math.round(Math.random() * 1e9)}${path.extname(file.originalname)}`;
-        cb(null, uniqueName);
+    filename: async function (req, file, cb) {
+        try {
+            const category = getFileCategory(file.mimetype, file.originalname);
+            const destPath = path.join(baseUploadDir, category);
+            const originalName = file.originalname;
+            const ext = path.extname(originalName);
+            const nameWithoutExt = path.basename(originalName, ext);
+            console.log(`上传文件: ${originalName}, 分类: ${category}, 存储路径: ${destPath}`);
+            // 先检查原文件名是否存在
+            let filePath = path.join(destPath, originalName);
+            let exists = await fileExists(filePath);
+            // 如果不存在，直接使用原文件名
+            console.log(`文件存在检查: ${filePath} - ${exists ? '存在' : '不存在'}`);
+            if (!exists) {
+                return cb(null, originalName);
+            }
+
+            // 如果存在，添加时间戳后缀
+            const timestamp = Date.now();
+            const uniqueName = `${nameWithoutExt}-${timestamp}${ext}`;
+            cb(null, uniqueName);
+        } catch (err) {
+            // 出错时使用原始的随机命名方式作为备份
+            console.error('生成文件名时出错:', err);
+            const uniqueName = `${Date.now()}-${Math.round(Math.random() * 1e9)}${path.extname(file.originalname)}`;
+            cb(null, uniqueName);
+        }
     }
 });
 
 // 配置multer
-const upload = multer({ 
+const upload = multer({
     storage,
     limits: {
         fileSize: 50 * 1024 * 1024 // 限制文件大小为50MB
@@ -117,14 +150,14 @@ app.post('/upload', upload.single('file'), (req, res) => {
     if (!req.file) {
         return res.status(400).json({ error: '没有文件被上传' });
     }
-    
+
     // 获取文件分类
     const category = getFileCategory(req.file.mimetype, req.file.originalname);
-    
+
     // 返回文件信息
     res.json({
         message: '文件上传成功',
-        url: `http://your-server-ip/uploads/${category}/${req.file.filename}`,
+        url: `https://hanphone.top/uploads/${category}/${req.file.filename}`,
         filename: req.file.filename,
         category: category,
         originalName: req.file.originalname,
@@ -136,26 +169,26 @@ app.post('/upload', upload.single('file'), (req, res) => {
 // 删除文件接口
 app.delete('/delete', async (req, res) => {
     const { filename, category } = req.body;
-    
+
     if (!filename || !category) {
         return res.status(400).json({ error: '请提供要删除的文件名和分类' });
     }
-    
+
     // 验证分类是否有效
     const validCategories = [...Object.keys(fileCategories), 'others'];
     if (!validCategories.includes(category)) {
         return res.status(400).json({ error: '无效的文件分类' });
     }
-    
+
     const filePath = path.join(baseUploadDir, category, filename);
-    
+
     try {
         // 检查文件是否存在
         await fs.access(filePath);
-        
+
         // 删除文件
         await fs.unlink(filePath);
-        
+
         res.json({ message: '文件删除成功', filename, category });
     } catch (err) {
         if (err.code === 'ENOENT') {
@@ -189,7 +222,7 @@ app.use('/uploads', express.static(baseUploadDir, {
             '.mp4': 'video/mp4',
             '.avi': 'video/x-msvideo'
         };
-        
+
         if (mimeTypes[ext]) {
             res.setHeader('Content-Type', mimeTypes[ext]);
         }
@@ -209,4 +242,3 @@ app.listen(PORT, () => {
     console.log(`服务器运行在 http://localhost:${PORT}`);
     console.log(`文件存储根目录: ${baseUploadDir}`);
 });
-    

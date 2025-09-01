@@ -1,0 +1,24 @@
+{
+  "name": "admin-file",
+  "version": "1.0.0",
+  "description": "文件管理服务器",
+  "main": "server.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HanphoneJan/admin-file.git"
+  },
+  "author": "hanphone",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/HanphoneJan/admin-file/issues"
+  },
+  "homepage": "https://github.com/HanphoneJan/admin-file#readme",
+  "dependencies": {
+    "express": "^5.1.0",
+    "multer": "^2.0.2"
+  }
+}
