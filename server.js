@@ -3,9 +3,22 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs').promises;
 const fsExists = require('fs').existsSync;
+// 引入cors中间件
+const cors = require('cors');
 const app = express();
 const PORT = process.env.PORT || 4000;
 const baseUploadDir = path.join(__dirname, 'uploads');
+
+// 配置CORS，允许所有来源的跨域请求
+// 生产环境中建议限制具体的origin
+app.use(cors({
+    origin: '*', 
+    methods: ['GET', 'POST', 'DELETE', 'OPTIONS'], // 允许的HTTP方法
+    allowedHeaders: ['Content-Type', 'Authorization','Token'] // 允许的请求头
+}));
+
+// 修正：预检请求通配符必须命名（将*改为/*all，all为自定义参数名）
+app.options('/*all', cors());
 
 // 定义文件类型分类（仅用于无命名空间时）
 const fileCategories = {
@@ -192,15 +205,24 @@ app.post('/upload', upload.single('file'), (req, res) => {
     // 构建URL路径
     let urlPath = '';
     if (namespace) {
-        // 有命名空间：命名空间/文件名
-        urlPath = `${namespace}/${req.file.filename}`;
+        // 1. 对命名空间编码（处理特殊字符如空格、中文）
+        const encodedNamespace = encodeURIComponent(namespace);
+        // 2. 对文件名编码（核心：处理中文/特殊符号文件名）
+        const encodedFilename = encodeURIComponent(req.file.filename);
+        // 3. 拼接编码后的路径片段
+        urlPath = `${encodedNamespace}/${encodedFilename}`;
     } else {
-        // 无命名空间：分类/文件名
-        urlPath = `${category}/${req.file.filename}`;
+        // 1. 对分类编码（虽分类通常是英文，但兼容特殊字符场景）
+        const encodedCategory = encodeURIComponent(category);
+        // 2. 对文件名编码
+        const encodedFilename = encodeURIComponent(req.file.filename);
+        // 3. 拼接编码后的路径片段
+        urlPath = `${encodedCategory}/${encodedFilename}`;
     }
 
     // 返回文件信息
     res.json({
+        code:200,
         message: '文件上传成功',
         url: `https://hanphone.top/${urlPath}`,
         filename: req.file.filename,
@@ -246,6 +268,7 @@ app.delete('/delete', async (req, res) => {
         await fs.unlink(filePath);
 
         res.json({
+            code:200,
             message: '文件删除成功',
             filename,
             category: namespace ? null : category,
