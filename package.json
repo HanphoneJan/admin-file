@@ -18,6 +18,7 @@
   },
   "homepage": "https://github.com/HanphoneJan/admin-file#readme",
   "dependencies": {
+    "cors": "^2.8.5",
     "express": "^5.1.0",
     "multer": "^2.0.2"
   }
