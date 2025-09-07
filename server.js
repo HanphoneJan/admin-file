@@ -11,7 +11,7 @@ const baseUploadDir = path.join(__dirname, 'uploads');
 // 配置CORS
 app.use(cors({
     origin: '*',
-    methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'POST', 'DELETE', 'OPTIONS', 'PUT'],
     allowedHeaders: ['Content-Type', 'Authorization', 'Token']
 }));
 
@@ -224,49 +224,284 @@ app.post('/upload', upload.single('file'), (req, res) => {
 });
 
 // 删除文件接口
+// 合并删除文件与目录的接口
 app.delete('/delete', async (req, res) => {
-    const { filename, namespace } = req.body;
-    const { category } = req.body;
-
-    if (!filename) {
-        return res.status(400).json({ error: '请提供要删除的文件名' });
-    }
-
-    if (!namespace && !category) {
-        return res.status(400).json({ error: '无命名空间时请提供文件分类' });
-    }
-
-    if (!namespace) {
-        const validCategories = [...Object.keys(fileCategories), 'others'];
-        if (!validCategories.includes(category)) {
-            return res.status(400).json({ error: '无效的文件分类' });
-        }
-    }
-
-    const filePath = path.join(getFullStoragePath(namespace, category), filename);
-
     try {
-        await fs.access(filePath);
-        await fs.unlink(filePath);
+        const { name, namespace, category, parentNamespace } = req.body;
+
+        if (!name) {
+            return res.status(400).json({ error: '请提供要删除的名称' });
+        }
+
+        // 确定目标路径
+        let targetPath;
+        if (namespace) {
+            // 命名空间模式
+            targetPath = path.join(baseUploadDir, namespace, name);
+        } else if (category) {
+            // 分类模式
+            targetPath = path.join(baseUploadDir, category, name);
+        } else if (parentNamespace) {
+            // 父命名空间下的目录
+            targetPath = path.join(baseUploadDir, parentNamespace, name);
+        } else {
+            // 根目录下的项目
+            targetPath = path.join(baseUploadDir, name);
+        }
+
+        // 检查目标是否存在
+        if (!await fileExists(targetPath)) {
+            return res.status(404).json({
+                error: '目标不存在',
+                name,
+                namespace,
+                category,
+                parentNamespace
+            });
+        }
+
+        // 获取目标信息
+        const stats = await fs.stat(targetPath);
+
+        // 判断是文件还是目录并执行删除
+        if (stats.isFile()) {
+            // 删除文件
+            await fs.unlink(targetPath);
+            res.json({
+                code: 200,
+                message: '文件删除成功',
+                type: 'file',
+                name,
+                namespace: namespace || parentNamespace || null,
+                category: category || null
+            });
+        } else if (stats.isDirectory()) {
+            // 检查目录是否为空
+            const items = await fs.readdir(targetPath);
+            if (items.length > 0) {
+                return res.status(400).json({
+                    error: '目录不为空，无法删除',
+                    type: 'directory',
+                    name,
+                    namespace: namespace || parentNamespace || null,
+                    category: category || null,
+                    itemCount: items.length
+                });
+            }
+
+            // 删除目录
+            await fs.rmdir(targetPath);
+            res.json({
+                code: 200,
+                message: '目录删除成功',
+                type: 'directory',
+                name,
+                namespace: namespace || parentNamespace || null,
+                category: category || null
+            });
+        }
+    } catch (err) {
+        console.error('删除操作失败:', err);
+        res.status(500).json({ error: '删除时发生错误' });
+    }
+});
+
+// 获取文件列表接口
+// 获取文件列表接口
+app.get('/files', async (req, res) => {
+    try {
+        const { namespace, category } = req.query;
+
+        if (!namespace && !category) {
+            // 获取所有命名空间和分类，包含大小和日期信息
+            const items = await fs.readdir(baseUploadDir, { withFileTypes: true });
+            const result = [];
+
+            for (const item of items) {
+                const itemPath = path.join(baseUploadDir, item.name);
+                const stats = await fs.stat(itemPath);
+
+                result.push({
+                    name: item.name,
+                    isDirectory: item.isDirectory(),
+                    type: item.isDirectory() ? 'namespace' : 'file',
+                    size: stats.size,         // 添加大小信息
+                    mtime: stats.mtime,       // 添加最后修改时间
+                    birthtime: stats.birthtime // 添加创建时间
+                });
+            }
+
+            return res.json({
+                code: 200,
+                message: '获取根目录内容成功',
+                items: result
+            });
+        }
+
+        const targetDir = getFullStoragePath(namespace, category);
+
+        // 检查目录是否存在
+        if (!await fileExists(targetDir)) {
+            return res.status(404).json({
+                error: '目录不存在',
+                namespace,
+                category
+            });
+        }
+
+        // 读取目录内容，包含目录本身的大小信息
+        const items = await fs.readdir(targetDir, { withFileTypes: true });
+        const fileItems = [];
+
+        // 获取目录自身的统计信息
+        const dirStats = await fs.stat(targetDir);
+
+        for (const item of items) {
+            const itemPath = path.join(targetDir, item.name);
+            const stats = await fs.stat(itemPath);
+
+            fileItems.push({
+                name: item.name,
+                isDirectory: item.isDirectory(),
+                size: stats.size,
+                mtime: stats.mtime, // 最后修改时间
+                birthtime: stats.birthtime, // 创建时间
+                category: !namespace ? category : null,
+                namespace: namespace || null
+            });
+        }
 
         res.json({
             code: 200,
-            message: '文件删除成功',
-            filename,
-            category: namespace ? null : category,
-            namespace: namespace || 'default'
+            message: '获取文件列表成功',
+            items: fileItems,
+            // 添加目录自身的信息
+            directoryInfo: {
+                name: namespace || category,
+                size: dirStats.size,
+                mtime: dirStats.mtime,
+                birthtime: dirStats.birthtime
+            },
+            namespace,
+            category
         });
     } catch (err) {
-        if (err.code === 'ENOENT') {
+        console.error('获取文件列表失败:', err);
+        res.status(500).json({ error: '获取文件列表时发生错误' });
+    }
+});
+// 获取文件详情接口
+app.get('/file', async (req, res) => {
+    try {
+        const { filename, namespace, category } = req.query;
+
+        if (!filename) {
+            return res.status(400).json({ error: '请提供文件名' });
+        }
+
+        if (!namespace && !category) {
+            return res.status(400).json({ error: '请提供命名空间或分类' });
+        }
+
+        const targetDir = getFullStoragePath(namespace, category);
+        const filePath = path.join(targetDir, filename);
+
+        // 检查文件是否存在
+        if (!await fileExists(filePath)) {
             return res.status(404).json({
                 error: '文件不存在',
                 filename,
-                category: namespace ? null : category,
-                namespace: namespace || 'default'
+                namespace,
+                category
             });
         }
-        console.error('删除文件失败:', err);
-        res.status(500).json({ error: '删除文件时发生错误' });
+
+        // 获取文件信息
+        const stats = await fs.stat(filePath);
+        const ext = path.extname(filename).toLowerCase();
+        let fileCategory = getFileCategory('', filename);
+
+        let urlPath = '';
+        if (namespace) {
+            const encodedNamespace = encodeURIComponent(namespace);
+            const encodedFilename = encodeURIComponent(filename);
+            urlPath = `${encodedNamespace}/${encodedFilename}`;
+        } else {
+            const encodedCategory = encodeURIComponent(category);
+            const encodedFilename = encodeURIComponent(filename);
+            urlPath = `${encodedCategory}/${encodedFilename}`;
+        }
+
+        res.json({
+            code: 200,
+            message: '获取文件详情成功',
+            file: {
+                name: filename,
+                originalName: filename, // 这里可以根据需要修改为实际原始名称
+                size: stats.size,
+                mtime: stats.mtime,
+                birthtime: stats.birthtime,
+                extension: ext,
+                category: fileCategory,
+                namespace: namespace || null,
+                url: `https://hanphone.top/${urlPath}`,
+                mimetype: extensionToCategory[ext] ?
+                    `${extensionToCategory[ext]}/${ext.substring(1)}` :
+                    'application/octet-stream'
+            }
+        });
+    } catch (err) {
+        console.error('获取文件详情失败:', err);
+        res.status(500).json({ error: '获取文件详情时发生错误' });
+    }
+});
+
+// 创建目录接口
+app.post('/directory', async (req, res) => {
+    try {
+        const { name, parentNamespace } = req.body;
+
+        if (!name) {
+            return res.status(400).json({ error: '请提供目录名称' });
+        }
+
+        // 确定父目录
+        let parentDir = baseUploadDir;
+        if (parentNamespace) {
+            parentDir = path.join(baseUploadDir, parentNamespace);
+            // 检查父命名空间是否存在
+            if (!await fileExists(parentDir)) {
+                return res.status(404).json({
+                    error: '父命名空间不存在',
+                    parentNamespace
+                });
+            }
+        }
+
+        const newDirPath = path.join(parentDir, name);
+
+        // 检查目录是否已存在
+        if (await fileExists(newDirPath)) {
+            return res.status(409).json({
+                error: '目录已存在',
+                directoryName: name,
+                parentNamespace
+            });
+        }
+
+        // 创建目录
+        await fs.mkdir(newDirPath, { recursive: true });
+
+        res.json({
+            code: 200,
+            message: '目录创建成功',
+            directoryName: name,
+            parentNamespace,
+            path: newDirPath
+        });
+    } catch (err) {
+        console.error('创建目录失败:', err);
+        res.status(500).json({ error: '创建目录时发生错误' });
     }
 });
 
@@ -296,6 +531,12 @@ app.use('/', express.static(baseUploadDir, {
         if (mimeTypes[ext]) {
             res.setHeader('Content-Type', mimeTypes[ext]);
         }
+        // 设置Content-Disposition触发下载
+        // 从文件路径中提取文件名
+        const fileName = path.basename(filePath);
+        // 对文件名进行编码以支持特殊字符
+        const encodedFileName = encodeURIComponent(fileName);
+        res.setHeader('Content-Disposition', `attachment; filename="${encodedFileName}"; filename*=UTF-8''${encodedFileName}`);
     }
 }));
 
