@@ -1,9 +1,11 @@
+require('dotenv').config();
 const express = require("express");
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs").promises;
 const fsExists = require("fs").existsSync;
 const cors = require("cors");
+const { verifyToken } = require('./token');
 const app = express();
 const PORT = process.env.PORT || 4000;
 const baseUploadDir = path.join(__dirname, "uploads");
@@ -336,12 +338,59 @@ const upload = multer({
   },
 });
 
+
+// 辅助函数：从 Authorization header 中提取 token
+const extractToken = (authHeader) => {
+  if (!authHeader) {
+    return null;
+  }
+
+  // 去除首尾的空格
+  let token = authHeader.trim();
+  
+  // 处理 Bearer 前缀（可能带引号）
+  if (token.toLowerCase().startsWith('bearer')) {
+    token = token.substring(6).trim(); // 移除 "bearer"（6个字符）
+  }
+  
+  // 处理可能包裹在 token 外层的单引号或双引号
+  if ((token.startsWith('"') && token.endsWith('"')) || 
+      (token.startsWith("'") && token.endsWith("'"))) {
+    token = token.slice(1, -1);
+  }
+  
+  return token.trim();
+};
+
+// Token 验证中间件
+const authenticateToken = (req, res, next) => {
+  // 优先使用 'Authorization' header，其次使用 'Token' header
+  // HTTP header 名称是大小写不敏感的，使用小写是更常见的 Node.js/Express 实践。
+  const authHeader = req.headers['authorization'] || req.headers['token'];
+
+  // 使用辅助函数提取 token
+  const token = extractToken(authHeader);
+
+  if (!token) {
+    return res.status(401).json({ error: "缺少访问令牌" });
+  }
+
+  // 假设 verifyToken 是您验证 token 的函数
+  const decoded = verifyToken(token);
+  if (!decoded) {
+    return res.status(403).json({ error: "无效的访问令牌" });
+  }
+
+  req.user = decoded;
+  next();
+};
+
 // 解析请求体
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // 上传文件接口
-app.post("/upload", upload.single("file"), async (req, res) => {
+app.post("/upload", authenticateToken, upload.single("file"), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: "没有文件被上传" });
   }
@@ -417,7 +466,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 });
 
 // 删除文件接口
-app.delete("/delete", async (req, res) => {
+app.delete("/delete", authenticateToken, async (req, res) => {
   try {
     const { name, namespace, category, parentNamespace } = req.body;
 
@@ -617,7 +666,7 @@ app.get("/file", async (req, res) => {
 });
 
 // 创建目录接口
-app.post("/directory", async (req, res) => {
+app.post("/directory", authenticateToken, async (req, res) => {
   try {
     const { name, parentNamespace } = req.body;
     if (!name) {
