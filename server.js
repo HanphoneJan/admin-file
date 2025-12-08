@@ -735,7 +735,10 @@ const previewableExtensions = new Set([
 app.use(
   "/",
   express.static(baseUploadDir, {
-    maxAge: "1d",
+    maxAge: "7d", // 延长缓存时间至7天
+    etag: true, // 启用etag支持
+    lastModified: true, // 启用last-modified支持
+    index: false, // 禁用目录索引
     setHeaders: (res, filePath) => {
       const ext = path.extname(filePath).toLowerCase();
 
@@ -773,6 +776,10 @@ app.use(
       if (mimeTypes[ext]) {
         res.setHeader("Content-Type", mimeTypes[ext]);
       }
+
+      // 优化缓存头设置
+      res.setHeader("Cache-Control", "public, max-age=604800");
+      res.setHeader("X-Content-Type-Options", "nosniff");
 
       const fileName = path.basename(filePath);
       const encodedFileName = encodeURIComponent(fileName);
