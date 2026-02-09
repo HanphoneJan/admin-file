@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 require('dotenv').config();
+const { logger } = require('./logger');
 
 const config = {
   SECRET_KEY: process.env.SECRET_KEY || 'your-default-secret-key-change-in-production'
@@ -29,7 +30,7 @@ function verifyToken(token) {
       }
     );
   } catch (error) {
-    console.error('验证Token失败', error);  // 增加错误日志
+    logger.warn('验证Token失败', { error: error.message, token: token.substring(0, 20) + '...' });
     return false;
   }
 }

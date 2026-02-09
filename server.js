@@ -5,11 +5,52 @@ const path = require("path");
 const fs = require("fs").promises;
 const fsExists = require("fs").existsSync;
 const cors = require("cors");
+const rateLimit = require("express-rate-limit");
+const swaggerUi = require('swagger-ui-express');
+const swaggerJsdoc = require('swagger-jsdoc');
 const { verifyToken } = require('./token');
+const { logger, httpLogger } = require('./logger');
 const app = express();
 const PORT = process.env.PORT || 4000;
 const baseUploadDir = path.join(__dirname, "uploads");
 const tempUploadDir = path.join(baseUploadDir, "temp"); // 定义临时目录
+const avatarUploadDir = path.join(baseUploadDir, "blog", "avatars"); // 头像上传目录
+
+/**
+ * @swagger
+ * components:
+ *   securitySchemes:
+ *     bearerAuth:
+ *       type: http
+ *       scheme: bearer
+ *       bearerFormat: JWT
+ */
+
+// Swagger 配置
+const swaggerOptions = {
+  definition: {
+    openapi: '3.0.0',
+    info: {
+      title: '文件管理服务器 API',
+      version: '1.0.0',
+      description: '文件上传、下载、管理接口文档',
+    },
+    servers: [
+      {
+        url: `http://localhost:${PORT}`,
+        description: '本地服务器',
+      },
+      {
+        url: 'https://hanphone.top',
+        description: '生产服务器',
+      },
+    ],
+  },
+  apis: ['./server.js', './token.js'], // 扫描的文件路径
+};
+
+const swaggerDocs = swaggerJsdoc(swaggerOptions);
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
 
 // 配置CORS
 app.use(
@@ -211,23 +252,36 @@ const extensionToCategory = {
 async function ensureDirectoryExists(dirPath) {
   try {
     if (!fsExists(dirPath)) {
-      console.log(`目录不存在，正在创建: ${dirPath}`);
+      logger.info(`目录不存在，正在创建: ${dirPath}`);
       await fs.mkdir(dirPath, { recursive: true });
-      console.log(`目录创建成功: ${dirPath}`);
+      logger.info(`目录创建成功: ${dirPath}`);
     }
   } catch (err) {
-    console.error(`创建目录失败 ${dirPath}:`, err);
+    logger.error(`创建目录失败 ${dirPath}:`, { error: err.message, stack: err.stack });
     throw err;
   }
 }
 
-// 初始化基础和临时上传目录
+// 初始化基础、临时和头像上传目录
 Promise.all([
   ensureDirectoryExists(baseUploadDir),
   ensureDirectoryExists(tempUploadDir),
+  ensureDirectoryExists(avatarUploadDir),
 ])
-  .then(() => console.log(`基础和临时上传目录准备就绪`))
-  .catch((err) => console.error("初始化目录失败:", err));
+  .then(() => logger.info(`基础、临时和头像上传目录准备就绪`))
+  .catch((err) => logger.error("初始化目录失败:", { error: err.message, stack: err.stack }));
+
+// 头像上传速率限制器（每IP每小时最多5次上传）
+const avatarUploadLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1小时
+  max: 5, // 最多5次请求
+  message: {
+    error: "上传频率过高，请稍后再试",
+    retryAfter: "3600"
+  },
+  standardHeaders: true,
+  legacyHeaders: false
+});
 
 // 确定文件分类
 function getFileCategory(mimetype, filename) {
@@ -283,7 +337,7 @@ function fixFileNameEncoding(originalName) {
   try {
     return Buffer.from(originalName, "latin1").toString("utf8");
   } catch (err) {
-    console.error("文件名编码转换失败:", err);
+    logger.warn("文件名编码转换失败", { originalName, error: err.message });
     return originalName;
   }
 }
@@ -297,7 +351,7 @@ const storage = multer.diskStorage({
       await ensureDirectoryExists(tempUploadDir);
       cb(null, tempUploadDir);
     } catch (err) {
-      console.error("设置临时存储目录失败:", err);
+      logger.error("设置临时存储目录失败:", { error: err.message, stack: err.stack });
       cb(err);
     }
   },
@@ -321,7 +375,7 @@ const storage = multer.diskStorage({
       const uniqueName = `${nameWithoutExt}-${timestamp}${ext}`;
       cb(null, uniqueName);
     } catch (err) {
-      console.error("生成文件名时出错:", err);
+      logger.error("生成文件名时出错:", { error: err.message, stack: err.stack });
       const uniqueName = `${Date.now()}-${Math.round(
         Math.random() * 1e9
       )}${path.extname(file.originalname)}`;
@@ -336,6 +390,63 @@ const upload = multer({
   limits: {
     fileSize: 1 * 1024 * 1024 * 1024, // 1GB
   },
+});
+
+// 头像上传配置（仅限图片，大小限制5MB）
+const avatarStorage = multer.diskStorage({
+  destination: async function (req, file, cb) {
+    try {
+      await ensureDirectoryExists(avatarUploadDir);
+      cb(null, avatarUploadDir);
+    } catch (err) {
+      logger.error("设置头像存储目录失败:", { error: err.message, stack: err.stack });
+      cb(err);
+    }
+  },
+  filename: async function (req, file, cb) {
+    try {
+      const originalName = fixFileNameEncoding(file.originalname);
+      const ext = path.extname(originalName);
+      const nameWithoutExt = path.basename(originalName, ext);
+      const timestamp = Date.now();
+      const uniqueName = `avatar-${timestamp}-${Math.round(Math.random() * 1e9)}${ext}`;
+      cb(null, uniqueName);
+    } catch (err) {
+      logger.error("生成头像文件名时出错:", { error: err.message, stack: err.stack });
+      const uniqueName = `avatar-${Date.now()}-${Math.round(Math.random() * 1e9)}${path.extname(file.originalname)}`;
+      cb(null, uniqueName);
+    }
+  },
+});
+
+// 头像上传过滤器（仅限图片）
+const avatarFileFilter = (req, file, cb) => {
+  const allowedMimetypes = [
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+    "image/avif",
+    "image/svg+xml"
+  ];
+  
+  const ext = path.extname(file.originalname).toLowerCase();
+  const allowedExtensions = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".svg"];
+  
+  if (allowedMimetypes.includes(file.mimetype) && allowedExtensions.includes(ext)) {
+    cb(null, true);
+  } else {
+    cb(new Error("仅限上传图片文件（jpg, jpeg, png, gif, webp, avif, svg）"), false);
+  }
+};
+
+// 头像上传配置
+const uploadAvatar = multer({
+  storage: avatarStorage,
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5MB
+  },
+  fileFilter: avatarFileFilter,
 });
 
 
@@ -364,6 +475,12 @@ const extractToken = (authHeader) => {
 
 // Token 验证中间件
 const authenticateToken = (req, res, next) => {
+  // 检查是否是公开接口（不需要认证）
+  const publicPaths = ['/upload/avatar'];
+  if (publicPaths.includes(req.path)) {
+    return next(); // 跳过认证
+  }
+  
   // 优先使用 'Authorization' header，其次使用 'Token' header
   // HTTP header 名称是大小写不敏感的，使用小写是更常见的 Node.js/Express 实践。
   const authHeader = req.headers['authorization'] || req.headers['token'];
@@ -385,10 +502,184 @@ const authenticateToken = (req, res, next) => {
   next();
 };
 
+// HTTP 请求日志中间件
+app.use((req, res, next) => {
+  const start = Date.now();
+  
+  // 记录请求开始
+  httpLogger.info({
+    type: 'request',
+    method: req.method,
+    url: req.url,
+    ip: req.ip,
+    userAgent: req.get('User-Agent'),
+    timestamp: new Date().toISOString()
+  });
+
+  // 重写 res.json 以记录响应
+  const originalJson = res.json.bind(res);
+  res.json = function(data) {
+    const duration = Date.now() - start;
+    
+    httpLogger.info({
+      type: 'response',
+      method: req.method,
+      url: req.url,
+      statusCode: res.statusCode,
+      duration: `${duration}ms`,
+      timestamp: new Date().toISOString(),
+      userId: req.user ? req.user.id : null,
+      response: data.error ? { error: data.error } : { code: data.code }
+    });
+    
+    return originalJson(data);
+  };
+
+  next();
+});
+
 // 解析请求体
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+/**
+ * @swagger
+ * /upload/avatar:
+ *   post:
+ *     summary: 上传头像（公共接口）
+ *     description: 无需认证，仅支持图片（jpg/png/gif/webp/avif/svg），大小≤5MB，每IP每小时限5次。支持自定义文件名
+ *     tags: [Avatar]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             required: [avatar]
+ *             properties:
+ *               avatar:
+ *                 type: string
+ *                 format: binary
+ *                 description: 头像图片（字段名必须是avatar）
+ *               filename:
+ *                 type: string
+ *                 description: 自定义文件名（可选，不包含扩展名）
+ *     responses:
+ *       200:
+ *         description: 上传成功
+ *         content:
+ *           application/json:
+ *             example: { "code": 200, "message": "头像上传成功", "url": "https://hanphone.top/blog/avatars/avatar-xxx.jpg" }
+ *       400:
+ *         description: 未上传文件或文件类型不支持
+ *       413:
+ *         description: 文件大小超过5MB限制
+ *       429:
+ *         description: 上传频率过高
+ *       500:
+ *         description: 服务器内部错误
+ */
+// 公共头像上传接口（无需认证，但有速率限制）
+app.post("/upload/avatar", avatarUploadLimiter, uploadAvatar.single("avatar"), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: "没有文件被上传" });
+  }
+
+  try {
+    const fixedName = fixFileNameEncoding(req.file.originalname);
+    const ext = path.extname(fixedName);
+    const customFilename = req.body.filename;
+    
+    let finalFilename;
+    if (customFilename && typeof customFilename === 'string' && customFilename.trim()) {
+      // 使用自定义文件名（清理非法字符）
+      const safeFilename = customFilename.trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+      finalFilename = `${safeFilename}${ext}`;
+    } else {
+      // 使用原始文件名（清理非法字符）
+      const originalNameWithoutExt = path.basename(fixedName, ext);
+      const safeOriginalName = originalNameWithoutExt.replace(/[^a-zA-Z0-9_-]/g, '_');
+      finalFilename = `${safeOriginalName}${ext}`;
+    }
+    
+    // 检查并处理文件名冲突
+    const finalPath = path.join(avatarUploadDir, finalFilename);
+    if (await fileExists(finalPath)) {
+      // 文件已存在，添加时间戳
+      const nameWithoutExt = path.basename(finalFilename, ext);
+      const timestamp = Date.now();
+      finalFilename = `${nameWithoutExt}-${timestamp}${ext}`;
+    }
+    
+    // 移动文件到最终位置并重命名
+    const finalFilePath = path.join(avatarUploadDir, finalFilename);
+    await fs.rename(req.file.path, finalFilePath);
+    
+    // 构建返回的URL
+    const encodedFilename = encodeURIComponent(finalFilename);
+    const urlPath = `blog/avatars/${encodedFilename}`;
+
+    res.json({
+      code: 200,
+      message: "头像上传成功",
+      url: `https://hanphone.top/${urlPath}`,
+      filename: finalFilename,
+      originalName: fixedName,
+      mimetype: req.file.mimetype,
+      size: req.file.size,
+    });
+  } catch (err) {
+    logger.error("处理头像上传时出错:", { error: err.message, stack: err.stack, filename: req.file?.filename });
+    if (req.file && req.file.path) {
+      await fs.unlink(req.file.path).catch((e) => logger.error("删除头像文件失败:", { error: e.message }));
+    }
+    res.status(500).json({ error: "头像上传失败" });
+  }
+});
+
+/**
+ * @swagger
+ * /upload:
+ *   post:
+ *     summary: 上传文件（需要认证）
+ *     description: 需要认证的文件上传接口，支持多种文件类型和分类，最大1GB
+ *     tags: [File]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             required: [file]
+ *             properties:
+ *               file:
+ *                 type: string
+ *                 format: binary
+ *                 description: 要上传的文件
+ *               category:
+ *                 type: string
+ *                 enum: [images, videos, audios, codes, documents, archives, fonts]
+ *                 description: 文件分类（可选，自动识别）
+ *               namespace:
+ *                 type: string
+ *                 description: 命名空间（可选，用于组织文件）
+ *     responses:
+ *       200:
+ *         description: 文件上传成功
+ *         content:
+ *           application/json:
+ *             example: { "code": 200, "message": "文件上传成功", "url": "https://hanphone.top/images/example.jpg", "filename": "xxx.jpg" }
+ *       400:
+ *         description: 没有文件被上传
+ *       401:
+ *         description: 缺少或无效的访问令牌
+ *       413:
+ *         description: 文件大小超过1GB限制
+ *       500:
+ *         description: 文件处理失败
+ */
 // 上传文件接口
 app.post("/upload", authenticateToken, upload.single("file"), async (req, res) => {
   if (!req.file) {
@@ -414,9 +705,11 @@ app.post("/upload", authenticateToken, upload.single("file"), async (req, res) =
 
     // 3. 如果最终路径和初始路径不同，则移动文件
     if (req.file.path !== finalPath) {
-      console.log(
-        `文件从临时目录 ${req.file.path} 移动到最终目录 ${finalPath}`
-      );
+      logger.info(`文件从临时目录移动到最终目录`, {
+        from: req.file.path,
+        to: finalPath,
+        filename: req.file.filename
+      });
       await fs.rename(req.file.path, finalPath);
       // 更新 req.file 对象，使其反映新位置，方便后续使用
       req.file.path = finalPath;
@@ -454,17 +747,61 @@ app.post("/upload", authenticateToken, upload.single("file"), async (req, res) =
       size: req.file.size,
     });
   } catch (err) {
-    console.error("处理上传文件时出错:", err);
+    logger.error("处理上传文件时出错:", { error: err.message, stack: err.stack, filename: req.file?.filename });
     // 如果移动失败，可以尝试删除临时文件
     if (req.file && req.file.path) {
       await fs
         .unlink(req.file.path)
-        .catch((e) => console.error("删除临时文件失败:", e));
+        .catch((e) => logger.error("删除临时文件失败:", { error: e.message }));
     }
     res.status(500).json({ error: "文件处理失败" });
   }
 });
 
+/**
+ * @swagger
+ * /delete:
+ *   delete:
+ *     summary: 删除文件或目录（需要认证）
+ *     description: 删除指定路径下的文件或空目录
+ *     tags: [File]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name]
+ *             properties:
+ *               name:
+ *                 type: string
+ *                 description: 要删除的文件名或目录名
+ *               namespace:
+ *                 type: string
+ *                 description: 命名空间（可选）
+ *               category:
+ *                 type: string
+ *                 description: 文件分类（可选）
+ *               parentNamespace:
+ *                 type: string
+ *                 description: 父命名空间（可选）
+ *     responses:
+ *       200:
+ *         description: 删除成功
+ *         content:
+ *           application/json:
+ *             example: { "code": 200, "message": "文件删除成功", "type": "file", "name": "xxx.jpg" }
+ *       400:
+ *         description: 请求错误（如目录不为空）
+ *       401:
+ *         description: 缺少或无效的访问令牌
+ *       404:
+ *         description: 目标不存在
+ *       500:
+ *         description: 删除时发生错误
+ */
 // 删除文件接口
 app.delete("/delete", authenticateToken, async (req, res) => {
   try {
@@ -534,13 +871,47 @@ app.delete("/delete", authenticateToken, async (req, res) => {
       });
     }
   } catch (err) {
-    console.error("删除操作失败:", err);
+    logger.error("删除操作失败:", { error: err.message, stack: err.stack, name: req.body.name });
     res.status(500).json({ error: "删除时发生错误" });
   }
 });
 
+/**
+ * @swagger
+ * /files:
+ *   get:
+ *     summary: 获取文件列表（需要认证）
+ *     description: 获取指定命名空间或分类下的文件和目录列表
+ *     tags: [File]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: namespace
+ *         schema:
+ *           type: string
+ *         description: 命名空间（与category二选一）
+ *       - in: query
+ *         name: category
+ *         schema:
+ *           type: string
+ *           enum: [images, videos, audios, codes, documents, archives, fonts, others]
+ *         description: 文件分类（与namespace二选一）
+ *     responses:
+ *       200:
+ *         description: 获取文件列表成功
+ *         content:
+ *           application/json:
+ *             example: { "code": 200, "message": "获取文件列表成功", "items": [{ "name": "xxx.jpg", "isDirectory": false, "size": 1024 }] }
+ *       401:
+ *         description: 缺少或无效的访问令牌
+ *       404:
+ *         description: 目录不存在
+ *       500:
+ *         description: 获取文件列表时发生错误
+ */
 // 获取文件列表接口
-app.get("/files", async (req, res) => {
+app.get("/files", authenticateToken, async (req, res) => {
   try {
     const { namespace, category } = req.query;
 
@@ -604,13 +975,55 @@ app.get("/files", async (req, res) => {
       category,
     });
   } catch (err) {
-    console.error("获取文件列表失败:", err);
+    logger.error("获取文件列表失败:", { error: err.message, stack: err.stack, namespace: req.query.namespace, category: req.query.category });
     res.status(500).json({ error: "获取文件列表时发生错误" });
   }
 });
 
+/**
+ * @swagger
+ * /file:
+ *   get:
+ *     summary: 获取文件详情（需要认证）
+ *     description: 获取指定文件的详细信息
+ *     tags: [File]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: filename
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: 文件名
+ *       - in: query
+ *         name: namespace
+ *         schema:
+ *           type: string
+ *         description: 命名空间（与category二选一）
+ *       - in: query
+ *         name: category
+ *         schema:
+ *           type: string
+ *           enum: [images, videos, audios, codes, documents, archives, fonts, others]
+ *         description: 文件分类（与namespace二选一）
+ *     responses:
+ *       200:
+ *         description: 获取文件详情成功
+ *         content:
+ *           application/json:
+ *             example: { "code": 200, "message": "获取文件详情成功", "file": { "name": "xxx.jpg", "size": 1024, "url": "https://hanphone.top/images/xxx.jpg" } }
+ *       400:
+ *         description: 参数错误（缺少文件名或命名空间/分类）
+ *       401:
+ *         description: 缺少或无效的访问令牌
+ *       404:
+ *         description: 文件不存在
+ *       500:
+ *         description: 获取文件详情时发生错误
+ */
 // 获取文件详情接口
-app.get("/file", async (req, res) => {
+app.get("/file", authenticateToken, async (req, res) => {
   try {
     const { filename, namespace, category } = req.query;
     if (!filename || (!namespace && !category)) {
@@ -660,7 +1073,7 @@ app.get("/file", async (req, res) => {
       },
     });
   } catch (err) {
-    console.error("获取文件详情失败:", err);
+    logger.error("获取文件详情失败:", { error: err.message, stack: err.stack, filename: req.query.filename });
     res.status(500).json({ error: "获取文件详情时发生错误" });
   }
 });
@@ -696,7 +1109,7 @@ app.post("/directory", authenticateToken, async (req, res) => {
       path: newDirPath,
     });
   } catch (err) {
-    console.error("创建目录失败:", err);
+    logger.error("创建目录失败:", { error: err.message, stack: err.stack, directoryName: req.body.name });
     res.status(500).json({ error: "创建目录时发生错误" });
   }
 });
@@ -815,14 +1228,27 @@ app.use(
 
 // 【修改 4】错误处理中间件，更新提示信息
 app.use((err, req, res, next) => {
-  console.error(err.stack);
+  logger.error("服务器错误:", { 
+    error: err.message, 
+    stack: err.stack, 
+    path: req.path,
+    method: req.method 
+  });
+  
   if (err.code === "LIMIT_FILE_SIZE") {
+    // 根据请求路径返回不同的错误信息
+    if (req.path === "/upload/avatar") {
+      return res.status(413).json({ error: "头像文件大小超过限制（最大5MB）" });
+    }
     return res.status(413).json({ error: "文件大小超过限制（最大1GB）" });
   }
   res.status(500).json({ error: "服务器内部错误" });
 });
 
 app.listen(PORT, () => {
-  console.log(`服务器运行在 http://localhost:${PORT}`);
-  console.log(`文件存储根目录: ${baseUploadDir}`);
+  logger.info(`服务器启动成功`, { 
+    port: PORT, 
+    env: process.env.NODE_ENV || 'development',
+    uploadDir: baseUploadDir 
+  });
 });

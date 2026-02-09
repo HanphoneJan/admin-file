@@ -136,3 +136,6 @@ dist
 .pnp.*
 nginx.conf
 ecosystem.config.cjs
+
+.trae
+.codebuddy
