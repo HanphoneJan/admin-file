@@ -104,8 +104,4 @@ admin-file/
 
 [![Star History Chart](https://api.star-history.com/svg?repos=HanphoneJan/admin-file&type=Date)](https://star-history.com/#HanphoneJan/admin-file&Date)
 
-## 📄 许可证
 
-本项目基于 [MIT](LICENSE) 许可证开源。![License](https://img.shields.io/badge/License-MIT-blue.svg)
-
-*文档更新于 2026年2月*
